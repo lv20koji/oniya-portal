@@ -21,6 +21,109 @@ function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+/* Toast notifications (modern-web-guidance: persistent-toast-notifications)
+   - popover="manual": stays until closed or timed out, never light-dismisses, never steals focus
+   - announced via document.ariaNotify() when available, otherwise via the
+     pre-existing aria-live regions (polite for success, assertive for error) */
+let toastSeq = 0;
+function toastRegion() { return document.getElementById('toastRegion'); }
+function popoverSupported(el) { return typeof el.showPopover === 'function'; }
+function restackToasts() {
+  let offset = 14;
+  toastRegion().querySelectorAll('.toast').forEach(t => {
+    if (popoverSupported(t) && t.matches(':popover-open')) {
+      t.style.right = '14px';
+      t.style.bottom = offset + 'px';
+      offset += t.offsetHeight + 8;
+    }
+  });
+}
+function finalizeToast(toast) {
+  if (!toast.isConnected) return;
+  clearTimeout(toast._timer);
+  const hadFocus = toast.contains(document.activeElement);
+  const trigger = toast._trigger;
+  if (popoverSupported(toast) && toast.matches(':popover-open')) {
+    try { toast.hidePopover(); } catch (e) { /* already hidden */ }
+  }
+  toast.remove();
+  restackToasts();
+  if (hadFocus) {
+    const next = toastRegion().querySelector('.toast .toast-close');
+    if (next) next.focus();
+    else if (trigger && trigger.isConnected && trigger.offsetParent !== null) trigger.focus();
+    else if (document.activeElement) document.activeElement.blur();
+  }
+}
+function dismissToast(toast) {
+  if (toast._closing) return;
+  toast._closing = true;
+  clearTimeout(toast._timer);
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches || !popoverSupported(toast)) {
+    finalizeToast(toast);
+    return;
+  }
+  toast.classList.add('toast-closing');
+  setTimeout(() => finalizeToast(toast), 190);
+}
+function scheduleToastDismiss(toast, delay) {
+  clearTimeout(toast._timer);
+  toast._timer = setTimeout(() => {
+    // Guide: if focus is inside the toast, pause dismissal until focus leaves
+    if (toast.contains(document.activeElement)) { scheduleToastDismiss(toast, 1200); return; }
+    dismissToast(toast);
+  }, delay);
+}
+function announceToast(message, isError) {
+  if (typeof document.ariaNotify === 'function') {
+    try { document.ariaNotify(message, { priority: isError ? 'high' : 'normal' }); return; }
+    catch (e) { /* fall through to live region */ }
+  }
+  const live = document.getElementById(isError ? 'toastLiveAssertive' : 'toastLivePolite');
+  live.textContent = '';
+  setTimeout(() => { live.textContent = message; }, 30);
+}
+function showToast(message, type) {
+  const isError = type === 'error';
+  const region = toastRegion();
+  const toast = document.createElement('div');
+  toastSeq += 1;
+  toast.id = 'toast-' + toastSeq;
+  toast.className = 'toast ' + (isError ? 'toast-error' : 'toast-success');
+  toast.setAttribute('popover', 'manual');
+  const trigger = document.activeElement;
+  toast._trigger = (trigger && trigger !== document.body && trigger.id !== 'importFile') ? trigger : null;
+
+  const icon = document.createElement('span');
+  icon.className = 'toast-icon';
+  icon.setAttribute('aria-hidden', 'true');
+  icon.textContent = isError ? '!' : '✓';
+  const text = document.createElement('span');
+  text.className = 'toast-text';
+  text.textContent = message;
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.className = 'toast-close';
+  close.textContent = '×';
+  close.setAttribute('aria-label', '通知を閉じる');
+  close.setAttribute('popovertarget', toast.id);
+  close.setAttribute('popovertargetaction', 'hide');
+  close.addEventListener('click', e => { e.preventDefault(); dismissToast(toast); });
+  toast.append(icon, text, close);
+  toast.addEventListener('toggle', e => { if (e.newState === 'closed') finalizeToast(toast); });
+  toast.addEventListener('mouseenter', () => clearTimeout(toast._timer));
+  toast.addEventListener('mouseleave', () => scheduleToastDismiss(toast, 3000));
+
+  region.appendChild(toast);
+  if (popoverSupported(toast)) {
+    try { toast.showPopover(); } catch (e) { /* falls back to in-flow display */ }
+  }
+  restackToasts();
+  announceToast(message, isError);
+  // Auto-dismiss (task spec); errors stay longer. Focus inside pauses via scheduleToastDismiss.
+  scheduleToastDismiss(toast, isError ? 8000 : 5000);
+}
+
 function jstDate(iso) {
   const d = new Date(iso);
   const parts = new Intl.DateTimeFormat('ja-JP', { timeZone: 'Asia/Tokyo', year: 'numeric', month: 'numeric', day: 'numeric', weekday: 'short' }).formatToParts(d);
@@ -160,8 +263,8 @@ document.getElementById('importFile').addEventListener('change', e => {
       }
       myData = clean;
       saveMy(); render();
-      alert('インポートしました（' + Object.keys(myData).length + ' 件）');
-    } catch (err) { alert('読み込めませんでした。JSONの形式を確認してください。'); }
+      showToast('インポートしました（' + Object.keys(myData).length + ' 件）', 'success');
+    } catch (err) { showToast('読み込めませんでした。JSONの形式を確認してください。', 'error'); }
     e.target.value = '';
   };
   reader.readAsText(file);
